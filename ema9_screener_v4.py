@@ -1,5 +1,5 @@
 """
-EMA9 Momentum Breakout Screener v4
+EMA9 Momentum Breakout Screener v4 (gold fallback fix)
 - Crypto: Binance Futures, MEXC Futures, Binance Spot (default 1h)
 - Gold XAUUSD (default 15m + 30m)
 - Telegram alerts
@@ -20,7 +20,7 @@ Last closed candle ignore freshness ke saath dekhna: python ema9_screener_v4.py 
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
@@ -42,6 +42,11 @@ CRYPTO_TFS = ["1h"]            # options: "15m", "30m", "1h"
 
 SCAN_GOLD = True               # XAUUSD scan on/off
 GOLD_TFS = ["15m", "30m"]      # options: "15m", "30m", "1h"
+
+# Gold data sources, is tarteeb se try honge (pehla jo chale wohi use hoga)
+GOLD_SOURCES = ["YAHOO_XAUUSD", "YAHOO_GOLD_FUT", "MEXC_XAUT", "BINANCE_XAUUSDT"]
+# True = MEXC/Binance wale gold (jo weekend par bhi chalte hain) sirf tab jab forex gold market khula ho
+GOLD_FOLLOW_FOREX_HOURS = True
 
 EMA_LEN = 9
 MIN_BODY_PCT = 60         # body kam az kam candle range ka itna % ho
@@ -71,7 +76,11 @@ STABLES = {"USDC", "FDUSD", "TUSD", "USDP", "DAI", "EUR", "AEUR", "USDE", "XUSD"
 BAD_PARTS = ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT")
 
 session = requests.Session()
-session.headers.update({"User-Agent": "Mozilla/5.0 (compatible; ema9-screener)"})
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Accept": "application/json,text/plain,*/*",
+})
 
 
 def http_get(bases, path, params=None):
@@ -84,6 +93,7 @@ def http_get(bases, path, params=None):
                     return r.json()
                 if r.status_code in (418, 429):
                     time.sleep(1.5 * (attempt + 1))
+                    last_err = f"{base} -> HTTP {r.status_code}"
                     continue
                 last_err = f"{base} -> HTTP {r.status_code}"
                 break
@@ -234,36 +244,69 @@ EX = {
 
 
 # ---------------- GOLD (XAUUSD) ----------------
-def yahoo_gold_candles(tf):
-    d = http_get(
-        ["https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"],
-        "/v8/finance/chart/XAUUSD=X",
-        {"interval": YAHOO_INT[tf], "range": "5d"},
-    )
-    res = d["chart"]["result"][0]
-    ts = res["timestamp"]
-    q = res["indicators"]["quote"][0]
-    candles = []
-    for i, t in enumerate(ts):
-        o, h, l, c = q["open"][i], q["high"][i], q["low"][i], q["close"][i]
-        if None in (o, h, l, c):
-            continue
-        candles.append((t, float(o), float(h), float(l), float(c)))
-    return keep_closed(candles, TF_SEC[tf])
+def yahoo_candles(ticker, tf):
+    errs = []
+    for base in ("https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"):
+        try:
+            d = http_get(
+                [base],
+                f"/v8/finance/chart/{ticker}",
+                {"interval": YAHOO_INT[tf], "range": "5d"},
+            )
+            res = (d.get("chart") or {}).get("result")
+            if not res:
+                raise RuntimeError(f"{base} -> no data ({(d.get('chart') or {}).get('error')})")
+            res = res[0]
+            ts = res.get("timestamp") or []
+            q = res["indicators"]["quote"][0]
+            candles = []
+            for i, t in enumerate(ts):
+                o, h, l, c = q["open"][i], q["high"][i], q["low"][i], q["close"][i]
+                if None in (o, h, l, c):
+                    continue
+                candles.append((t, float(o), float(h), float(l), float(c)))
+            return keep_closed(candles, TF_SEC[tf])
+        except Exception as e:
+            errs.append(str(e))
+    raise RuntimeError(" | ".join(errs))
+
+
+def forex_gold_open():
+    """Forex gold market: Sunday ~22:00 UTC se Friday ~22:00 UTC tak"""
+    n = datetime.now(timezone.utc)
+    wd, hr = n.weekday(), n.hour  # Mon=0 ... Sun=6
+    if wd == 5:
+        return False
+    if wd == 4 and hr >= 22:
+        return False
+    if wd == 6 and hr < 22:
+        return False
+    return True
+
+
+GOLD_FETCHERS = {
+    "YAHOO_XAUUSD": ("Yahoo XAUUSD", lambda tf: yahoo_candles("XAUUSD=X", tf), False),
+    "YAHOO_GOLD_FUT": ("Yahoo GC=F", lambda tf: yahoo_candles("GC=F", tf), False),
+    "MEXC_XAUT": ("MEXC XAUT", lambda tf: mexc_fut_candles("XAUT_USDT", tf), True),
+    "BINANCE_XAUUSDT": ("Binance XAUUSDT", lambda tf: binance_fut_candles("XAUUSDT", tf), True),
+}
 
 
 def gold_candles(tf):
-    """Pehle Yahoo XAUUSD=X, na chale to Binance Futures XAUUSDT"""
-    try:
-        c = yahoo_gold_candles(tf)
-        if len(c) >= AVG_BODY_LEN + EMA_LEN + 2:
-            return c, "Yahoo"
-    except Exception as e:
-        print(f"[Gold {tf}] Yahoo fail: {e}")
-    try:
-        return binance_fut_candles("XAUUSDT", tf), "Binance XAUUSDT"
-    except Exception as e:
-        print(f"[Gold {tf}] Binance XAUUSDT fail: {e}")
+    """GOLD_SOURCES ki tarteeb se try karo, jo pehle chale wohi use karo"""
+    min_len = AVG_BODY_LEN + EMA_LEN + 2
+    for key in GOLD_SOURCES:
+        label, fn, is_crypto = GOLD_FETCHERS[key]
+        if is_crypto and GOLD_FOLLOW_FOREX_HOURS and not ALL_MODE and not forex_gold_open():
+            print(f"[Gold {tf}] {label}: forex gold market band hai, skip")
+            continue
+        try:
+            c = fn(tf)
+            if len(c) >= min_len:
+                return c, label
+            print(f"[Gold {tf}] {label}: data kam aaya ({len(c)} candles)")
+        except Exception as e:
+            print(f"[Gold {tf}] {label} fail: {e}")
     return [], ""
 
 
