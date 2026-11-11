@@ -1,13 +1,11 @@
 """
-EMA200 Rejection Screener (1h)
-- Crypto: Binance Futures, MEXC Futures, Binance Spot
+EMA200 Rejection Screener (1h) - v2
+- Crypto: MEXC Futures + Binance Spot  (Binance Futures GitHub par block hai, HTTP 451)
 - Telegram alerts
 
 Signal (1h candle, EMA200 se rejection):
-  BULL = candle ki wick EMA200 ke NECHAY gayi (low <= EMA200)
-         lekin close EMA200 ke UPAR hua (neeche se wapas utha, support)
-  BEAR = candle ki wick EMA200 ke UPAR gayi (high >= EMA200)
-         lekin close EMA200 ke NECHAY hua (upar se wapas gira, resistance)
+  BULL = wick EMA200 ke NECHAY gayi, close EMA200 ke UPAR (support se bounce)
+  BEAR = wick EMA200 ke UPAR gayi, close EMA200 ke NECHAY (resistance se reject)
   Saath mein rejection wick candle range ka kam az kam MIN_WICK_PCT % ho.
 
 Run once: python ema200_screener.py
@@ -29,7 +27,6 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 EXCHANGES = [
-    "BINANCE_FUTURES",
     "MEXC_FUTURES",
     "BINANCE_SPOT",
 ]
@@ -39,20 +36,19 @@ EMA_LEN = 200
 CANDLES = 400                 # EMA200 ke liye kafi history
 MIN_CANDLES = 250             # is se kam history wale (nayi listing) pairs skip
 
-MIN_WICK_PCT = 40             # rejection wick candle range ka kam az kam itna %
-BODY_STAYS_OUTSIDE = True     # True = candle ki BODY bhi EMA200 ki sahi taraf rahe
-                              # (sirf wick ne touch kiya ho). False = sirf close sahi taraf ho
-TOUCH_TOL_PCT = 0.0           # EMA200 ke qareeb (itne % tak) wick ko bhi touch maano, 0.2 = 0.2%
+MIN_WICK_PCT = 35             # rejection wick candle range ka kam az kam itna %
+BODY_STAYS_OUTSIDE = True     # True = body bhi EMA200 ki sahi taraf rahe (sirf wick ne touch kiya ho)
+TOUCH_TOL_PCT = 0.3           # EMA200 ke itne % qareeb wali wick ko bhi touch maano
 REQUIRE_CANDLE_COLOR = True   # BULL = green candle, BEAR = red candle
 
-MIN_VOLUME_USDT = 5_000_000   # 24h volume filter
+MIN_VOLUME_USDT = 1_000_000   # 24h volume filter (kam = zyada pairs)
 SHOW_BULL = True
 SHOW_BEAR = True
 MAX_TELEGRAM_ROWS = 40
 
 FRESH_MINUTES = 14            # candle itne minute ke andar band hui ho (dobara alert na aaye)
 
-WORKERS = {"BINANCE_FUTURES": 10, "BINANCE_SPOT": 10, "MEXC_FUTURES": 4}
+WORKERS = {"BINANCE_SPOT": 10, "MEXC_FUTURES": 4}
 # ============================================
 
 ALL_MODE = "--all" in sys.argv
@@ -93,7 +89,7 @@ def http_get(bases, path, params=None):
 
 
 def ema(values, length):
-    # pehli 'length' candles ka SMA se seed (TradingView jaisa behtar match)
+    # pehli 'length' candles ke SMA se seed (TradingView jaisa behtar match)
     if len(values) < length:
         return [values[0]] * len(values)
     k = 2 / (length + 1)
@@ -153,9 +149,12 @@ def build_messages(results):
     return msgs
 
 
-# ---------------- BINANCE ----------------
-def binance_symbols(base_urls, path):
-    data = http_get(base_urls, path)
+# ---------------- BINANCE SPOT ----------------
+SPOT_BASES = ["https://api.binance.com", "https://data-api.binance.vision"]
+
+
+def binance_spot_symbols():
+    data = http_get(SPOT_BASES, "/api/v3/ticker/24hr")
     out = []
     for t in data:
         s = t["symbol"]
@@ -171,30 +170,10 @@ def binance_symbols(base_urls, path):
     return out
 
 
-def binance_klines(base_urls, path, symbol, tf):
-    k = http_get(base_urls, path, {"symbol": symbol, "interval": tf, "limit": CANDLES})
+def binance_spot_candles(sym, tf):
+    k = http_get(SPOT_BASES, "/api/v3/klines", {"symbol": sym, "interval": tf, "limit": CANDLES})
     candles = [(x[0] / 1000, float(x[1]), float(x[2]), float(x[3]), float(x[4])) for x in k]
     return keep_closed(candles, TF_SEC[tf])
-
-
-SPOT_BASES = ["https://api.binance.com", "https://data-api.binance.vision"]
-FUT_BASES = ["https://fapi.binance.com"]
-
-
-def binance_spot_symbols():
-    return binance_symbols(SPOT_BASES, "/api/v3/ticker/24hr")
-
-
-def binance_spot_candles(sym, tf):
-    return binance_klines(SPOT_BASES, "/api/v3/klines", sym, tf)
-
-
-def binance_fut_symbols():
-    return binance_symbols(FUT_BASES, "/fapi/v1/ticker/24hr")
-
-
-def binance_fut_candles(sym, tf):
-    return binance_klines(FUT_BASES, "/fapi/v1/klines", sym, tf)
 
 
 # ---------------- MEXC FUTURES ----------------
@@ -234,7 +213,6 @@ def mexc_fut_candles(sym, tf):
 
 EX = {
     "BINANCE_SPOT": ("Binance Spot", binance_spot_symbols, binance_spot_candles),
-    "BINANCE_FUTURES": ("Binance Fut", binance_fut_symbols, binance_fut_candles),
     "MEXC_FUTURES": ("MEXC Fut", mexc_fut_symbols, mexc_fut_candles),
 }
 
