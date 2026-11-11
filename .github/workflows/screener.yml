@@ -23,7 +23,7 @@ jobs:
         run: pip install requests
 
       - name: Run screener
-        run: python ema9_screener_v4.py $ARGS
+      run: python ema200_screener.py $ARGS
         env:
           ARGS: ${{ github.event.inputs.args }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
