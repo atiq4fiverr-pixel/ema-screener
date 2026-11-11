@@ -1,7 +1,7 @@
 name: EMA9 Screener
 
 on:
-   workflow_dispatch:
+  workflow_dispatch:
     inputs:
       args:
         description: "Optional: --test ya --all"
@@ -23,7 +23,7 @@ jobs:
         run: pip install requests
 
       - name: Run screener
-      run: python ema200_screener.py $ARGS
+        run: python ema200_screener.py $ARGS
         env:
           ARGS: ${{ github.event.inputs.args }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
